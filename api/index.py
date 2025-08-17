@@ -1,218 +1,395 @@
-from http.server import BaseHTTPRequestHandler
-import json
-import urllib.parse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import httpx
+import asyncio
+from typing import Dict, Optional
 
-# Simple storage
-API_KEYS = {}
+# Create FastAPI app
+app = FastAPI(title="Malayalam Movies Stremio Addon")
 
-class handler(BaseHTTPRequestHandler):
+# Add CORS middleware - CRITICAL for Stremio
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory storage (serverless compatible)
+api_keys: Dict[str, str] = {}
+movies_cache: list = []
+
+# TMDB Configuration
+TMDB_BASE_URL = "https://api.themoviedb.org/3"
+
+async def tmdb_request(endpoint: str, api_key: str, params: dict = None):
+    """Make async request to TMDB API"""
+    if not params:
+        params = {}
+    params["api_key"] = api_key
     
-    def add_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+    url = f"{TMDB_BASE_URL}/{endpoint}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+    except Exception as e:
+        print(f"TMDB API error: {e}")
+        return None
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.add_cors_headers()
-        self.end_headers()
-
-    def do_GET(self):
-        path = self.path.split("?")[0]
-        
-        if path == "/" or path == "":
-            self.home_page()
-        elif path == "/manifest.json":
-            self.manifest()
-        elif path == "/catalog/movie/malayalam.json":
-            self.catalog()
-        elif path == "/configure":
-            self.configure_page()
-        elif path == "/refresh":
-            self.refresh_page()
-        else:
-            self.send_error(404, "Not Found")
-
-    def do_POST(self):
-        if self.path == "/configure":
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length).decode()
+async def fetch_malayalam_movies(api_key: str) -> list:
+    """Fetch Malayalam movies from TMDB - simplified for serverless"""
+    movies = []
+    
+    try:
+        # Fetch only first 2 pages to avoid timeout
+        for page in range(1, 3):
+            params = {
+                "with_original_language": "ml",
+                "sort_by": "release_date.desc", 
+                "region": "IN",
+                "page": page
+            }
+            
+            data = await tmdb_request("discover/movie", api_key, params)
+            if not data or not data.get("results"):
+                break
                 
-                # Parse form data
-                parsed_data = urllib.parse.parse_qs(body)
-                api_key = parsed_data.get("api_key", [None])[0]
-                
-                if api_key and len(api_key) > 10:
-                    API_KEYS["default"] = api_key
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html")
-                    self.add_cors_headers()
-                    self.end_headers()
-                    self.wfile.write(b"<h1>\\xe2\\x9c\\x85 API Key Saved!</h1><a href='/'>Home</a>")
-                else:
-                    self.send_response(400)
-                    self.send_header("Content-Type", "text/html")
-                    self.add_cors_headers()
-                    self.end_headers()
-                    self.wfile.write(b"<h1>\\xe2\\x9d\\x8c Invalid API Key</h1><a href='/configure'>Try Again</a>")
-            except Exception as e:
-                self.send_response(500)
-                self.send_header("Content-Type", "text/html")
-                self.add_cors_headers()
-                self.end_headers()
-                self.wfile.write(f"<h1>Error: {str(e)}</h1>".encode())
-        else:
-            self.send_error(404, "Not Found")
-
-    def home_page(self):
-        status = "Ready" if "default" in API_KEYS else "API Key Required"
-        host = self.headers.get("Host", "your-addon.vercel.app")
+            for movie in data["results"]:
+                if not movie.get("id") or not movie.get("title"):
+                    continue
+                    
+                # Get IMDb ID
+                ext_data = await tmdb_request(f"movie/{movie['id']}/external_ids", api_key)
+                if ext_data and ext_data.get("imdb_id"):
+                    imdb_id = ext_data["imdb_id"]
+                    if imdb_id.startswith("tt"):
+                        movies.append({
+                            "id": imdb_id,
+                            "type": "movie",
+                            "name": movie["title"],
+                            "poster": f"https://image.tmdb.org/t/p/w500{movie['poster_path']}" if movie.get('poster_path') else None,
+                            "description": movie.get("overview", ""),
+                            "releaseInfo": movie.get("release_date", ""),
+                            "background": f"https://image.tmdb.org/t/p/w780{movie['backdrop_path']}" if movie.get('backdrop_path') else None
+                        })
+                        
+        return movies[:50]  # Limit to 50 movies for performance
         
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Malayalam Movies Addon</title>
-            <style>
-                body {{ font-family: Arial; max-width: 600px; margin: 20px auto; padding: 20px; }}
-                .status {{ background: #e8f5e8; padding: 15px; border-radius: 8px; margin: 20px 0; }}
-                .btn {{ background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; 
-                       border-radius: 5px; margin: 5px; display: inline-block; }}
-                .manifest {{ background: #f0f0f0; padding: 10px; border-radius: 5px; font-family: monospace; 
-                           word-break: break-all; margin: 10px 0; }}
-            </style>
-        </head>
-        <body>
-            <h1>🎬 Malayalam Movies Addon (Pure Python)</h1>
+    except Exception as e:
+        print(f"Error fetching movies: {e}")
+        return []
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    """Home page"""
+    status = "✅ Ready" if api_keys.get("default") else "⚠️ API Key Required"
+    movie_count = len(movies_cache)
+    host = request.headers.get("host", "your-addon.vercel.app")
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Malayalam Movies Stremio Addon</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                max-width: 700px; margin: 20px auto; padding: 20px; background: #f8f9fa;
+            }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .status {{ 
+                background: linear-gradient(135deg, #e8f5e8, #d4edda); 
+                padding: 20px; border-radius: 12px; margin: 20px 0; 
+                border-left: 4px solid #28a745;
+            }}
+            .btn {{ 
+                background: linear-gradient(135deg, #28a745, #20c997); 
+                color: white; padding: 12px 24px; text-decoration: none; 
+                border-radius: 8px; margin: 8px; display: inline-block; 
+                font-weight: 600; transition: transform 0.2s;
+            }}
+            .btn:hover {{ transform: translateY(-2px); }}
+            .manifest {{ 
+                background: #f8f9fa; padding: 15px; border-radius: 8px; 
+                font-family: 'Monaco', 'Menlo', monospace; font-size: 14px;
+                word-break: break-all; margin: 15px 0; border: 1px solid #dee2e6;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🎬 Malayalam Movies Stremio Addon</h1>
+            <p style="color: #6c757d; font-size: 16px;">Powered by FastAPI - High Performance & Modern</p>
+        </div>
+        
+        <div class="status">
+            <p><strong>📊 Status:</strong> {status}</p>
+            <p><strong>🎭 Movies Cached:</strong> {movie_count}</p>
+            <p><strong>⚡ Framework:</strong> FastAPI (High Performance)</p>
+        </div>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="/configure" class="btn">⚙️ Configure API Key</a>
+            <a href="/refresh" class="btn">🔄 Refresh Movies</a>
+            <a href="/manifest.json" class="btn" target="_blank">📋 View Manifest</a>
+        </div>
+        
+        <div style="background: white; padding: 20px; border-radius: 12px; margin: 20px 0;">
+            <h3>📱 Add to Stremio:</h3>
+            <p>Copy this URL and paste in Stremio → Addons → Add Addon:</p>
+            <div class="manifest">https://{host}/manifest.json</div>
+        </div>
+        
+        <div style="background: white; padding: 20px; border-radius: 12px; margin: 20px 0;">
+            <h4>🚀 FastAPI Benefits:</h4>
+            <ul>
+                <li>⚡ High performance async operations</li>
+                <li>🎯 Built-in API documentation</li>
+                <li>📝 Automatic request validation</li>
+                <li>🔄 Modern Python async/await support</li>
+            </ul>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.get("/configure", response_class=HTMLResponse)
+async def configure_get():
+    """Configuration page"""
+    current_key = "✅ Configured" if api_keys.get("default") else "❌ Not Set"
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Configure TMDB API Key</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                max-width: 600px; margin: 20px auto; padding: 20px; background: #f8f9fa;
+            }}
+            .form-container {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+            .form-group {{ margin: 20px 0; }}
+            label {{ display: block; margin-bottom: 8px; font-weight: 600; color: #495057; }}
+            input {{ 
+                width: 100%; padding: 12px; border: 2px solid #dee2e6; border-radius: 8px; 
+                font-size: 16px; transition: border-color 0.3s; box-sizing: border-box;
+            }}
+            input:focus {{ border-color: #28a745; outline: none; box-shadow: 0 0 0 3px rgba(40,167,69,0.1); }}
+            button {{ 
+                background: linear-gradient(135deg, #28a745, #20c997); color: white; 
+                padding: 14px 28px; border: none; border-radius: 8px; font-size: 16px; 
+                font-weight: 600; cursor: pointer; width: 100%; transition: transform 0.2s;
+            }}
+            button:hover {{ transform: translateY(-2px); }}
+            .info {{ 
+                background: linear-gradient(135deg, #e8f4fd, #cce7ff); 
+                padding: 20px; border-radius: 8px; margin: 20px 0; 
+                border-left: 4px solid #007bff;
+            }}
+            .status {{ 
+                background: #f8f9fa; padding: 15px; border-radius: 8px; 
+                text-align: center; margin: 20px 0; font-weight: 600;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="form-container">
+            <h1 style="text-align: center; color: #495057;">⚙️ Configure TMDB API Key</h1>
             
             <div class="status">
-                <p><strong>Status:</strong> {status}</p>
-                <p><strong>Framework:</strong> Pure Python (Ultra Stable)</p>
+                Current Status: {current_key}
             </div>
-            
-            <div>
-                <a href="/configure" class="btn">Configure API Key</a>
-                <a href="/refresh" class="btn">Refresh Movies</a>
-                <a href="/manifest.json" class="btn" target="_blank">View Manifest</a>
-            </div>
-            
-            <h3>Stremio Manifest URL:</h3>
-            <div class="manifest">https://{host}/manifest.json</div>
-            <p><small>Copy and paste in Stremio</small></p>
-        </body>
-        </html>
-        """
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.add_cors_headers()
-        self.end_headers()
-        self.wfile.write(html.encode())
-
-    def configure_page(self):
-        html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Configure API Key</title>
-            <style>
-                body { font-family: Arial; max-width: 500px; margin: 20px auto; padding: 20px; }
-                .form-group { margin: 15px 0; }
-                input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
-                button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 5px; }
-                .info { background: #e8f4fd; padding: 15px; border-radius: 5px; margin: 20px 0; }
-            </style>
-        </head>
-        <body>
-            <h1>Configure TMDB API Key</h1>
             
             <div class="info">
-                <h3>How to get API Key:</h3>
+                <h3>📝 How to get your TMDB API Key:</h3>
                 <ol>
-                    <li>Go to <a href="https://www.themoviedb.org/signup" target="_blank">TMDB.org</a></li>
-                    <li>Visit <a href="https://www.themoviedb.org/settings/api" target="_blank">API Settings</a></li>
-                    <li>Copy "API Key (v3 auth)" and paste below</li>
+                    <li>Create a free account at <a href="https://www.themoviedb.org/signup" target="_blank">themoviedb.org</a></li>
+                    <li>Verify your email and log in</li>
+                    <li>Go to <a href="https://www.themoviedb.org/settings/api" target="_blank">Settings → API</a></li>
+                    <li>Copy your <strong>"API Key (v3 auth)"</strong> and paste below</li>
+                    <li>Click Save and then refresh your movies!</li>
                 </ol>
             </div>
             
-            <form method="post">
+            <form method="post" action="/configure">
                 <div class="form-group">
-                    <input name="api_key" placeholder="Paste TMDB API key here" required>
+                    <label for="api_key">🔑 TMDB API Key:</label>
+                    <input type="text" id="api_key" name="api_key" 
+                           placeholder="Enter your TMDB API key (32+ characters)" 
+                           required minlength="20">
                 </div>
-                <button type="submit">Save Key</button>
+                <button type="submit">💾 Save Configuration</button>
             </form>
             
-            <p><a href="/">Back to Home</a></p>
+            <p style="text-align: center; margin-top: 30px;">
+                <a href="/" style="color: #007bff; text-decoration: none; font-weight: 600;">← Back to Home</a>
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.post("/configure", response_class=HTMLResponse)
+async def configure_post(api_key: str = Form(...)):
+    """Save API key configuration"""
+    api_key = api_key.strip()
+    
+    if not api_key or len(api_key) < 15:
+        return """
+        <html><body style="font-family: Arial; text-align: center; padding: 50px; background: #f8f9fa;">
+        <div style="background: #fff; padding: 30px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+            <h1 style="color: #dc3545;">❌ Invalid API Key</h1>
+            <p>Please enter a valid TMDB API key (at least 15 characters).</p>
+            <a href="/configure" style="color: #28a745; text-decoration: none; font-weight: 600;">🔄 Try Again</a>
+        </div>
+        </body></html>
+        """
+    
+    # Test the API key with a simple request
+    test_data = await tmdb_request("configuration", api_key)
+    if not test_data:
+        return """
+        <html><body style="font-family: Arial; text-align: center; padding: 50px; background: #f8f9fa;">
+        <div style="background: #fff; padding: 30px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+            <h1 style="color: #dc3545;">❌ API Key Test Failed</h1>
+            <p>The API key appears to be invalid or there was a connection error.</p>
+            <a href="/configure" style="color: #28a745; text-decoration: none; font-weight: 600;">🔄 Try Again</a>
+        </div>
+        </body></html>
+        """
+    
+    api_keys["default"] = api_key
+    
+    return """
+    <html>
+    <head>
+        <title>Configuration Saved</title>
+        <style>
+            body { font-family: Arial; text-align: center; padding: 50px; background: #f8f9fa; }
+            .success { background: #fff; padding: 40px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            .btn { background: #28a745; color: white; padding: 12px 24px; text-decoration: none; 
+                  border-radius: 8px; margin: 10px; display: inline-block; font-weight: 600; }
+        </style>
+    </head>
+    <body>
+        <div class="success">
+            <h1 style="color: #28a745;">✅ Configuration Saved Successfully!</h1>
+            <p>Your TMDB API key is now configured and tested.</p>
+            <p>You can now refresh movies to populate your catalog.</p>
+            
+            <a href="/" class="btn">🏠 Go to Home</a>
+            <a href="/refresh" class="btn" style="background: #007bff;">🔄 Refresh Movies Now</a>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.get("/manifest.json")
+async def manifest():
+    """Stremio addon manifest"""
+    return {
+        "id": "org.malayalam.fastapi.movies",
+        "version": "1.0.0",
+        "name": "Malayalam Movies (FastAPI)",
+        "description": "Latest Malayalam movies from TMDB - High performance FastAPI addon",
+        "resources": ["catalog"],
+        "types": ["movie"],
+        "catalogs": [{
+            "type": "movie",
+            "id": "malayalam",
+            "name": "Malayalam Movies",
+            "extra": [{"name": "skip", "isRequired": False}]
+        }],
+        "idPrefixes": ["tt"],
+        "background": "https://images.unsplash.com/photo-1489599363012-b366b67c0fe5?w=1200&q=80",
+        "logo": "https://images.unsplash.com/photo-1578662996442-48f60103fc96?w=200&q=80"
+    }
+
+@app.get("/catalog/movie/malayalam.json")
+async def catalog():
+    """Movie catalog for Stremio"""
+    if not api_keys.get("default"):
+        return {
+            "metas": [], 
+            "message": "Please configure your TMDB API key first at the addon homepage"
+        }
+    
+    # Return cached movies (limit to first 100 for performance)
+    return {
+        "metas": movies_cache[:100] if movies_cache else [],
+        "cacheMaxAge": 3600  # Cache for 1 hour
+    }
+
+@app.get("/refresh", response_class=HTMLResponse)
+async def refresh():
+    """Refresh movie catalog"""
+    if not api_keys.get("default"):
+        return """
+        <html><body style="font-family: Arial; text-align: center; padding: 50px; background: #f8f9fa;">
+        <div style="background: #fff; padding: 30px; border-radius: 12px; display: inline-block;">
+            <h1 style="color: #ffc107;">⚠️ API Key Required</h1>
+            <p>Please configure your TMDB API key first.</p>
+            <a href="/configure" style="color: #007bff; text-decoration: none; font-weight: 600;">⚙️ Configure API Key</a>
+        </div>
+        </body></html>
+        """
+    
+    # Fetch movies in background (simplified for serverless)
+    try:
+        api_key = api_keys["default"]
+        new_movies = await fetch_malayalam_movies(api_key)
+        movies_cache.clear()
+        movies_cache.extend(new_movies)
+        
+        movie_count = len(movies_cache)
+        
+        return f"""
+        <html>
+        <head>
+            <title>Refresh Complete</title>
+            <style>
+                body {{ font-family: Arial; text-align: center; padding: 50px; background: #f8f9fa; }}
+                .container {{ background: #fff; padding: 40px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+                .btn {{ background: #28a745; color: white; padding: 12px 24px; text-decoration: none; 
+                      border-radius: 8px; margin: 10px; display: inline-block; font-weight: 600; }}
+                .success {{ background: #d4edda; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🔄 Refresh Complete!</h1>
+                <div class="success">
+                    <p><strong>✅ Successfully fetched {movie_count} Malayalam movies!</strong></p>
+                    <p>Movies are now available in your Stremio catalog.</p>
+                </div>
+                
+                <p>Your addon is ready to use with the latest Malayalam movies from TMDB.</p>
+                
+                <a href="/" class="btn">🏠 Back to Home</a>
+                <a href="/catalog/movie/malayalam.json" class="btn" target="_blank" style="background: #007bff;">📋 View Catalog</a>
+            </div>
         </body>
         </html>
         """
         
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.add_cors_headers()
-        self.end_headers()
-        self.wfile.write(html.encode())
+    except Exception as e:
+        return f"""
+        <html><body style="font-family: Arial; text-align: center; padding: 50px;">
+        <div style="background: #fff; padding: 30px; border-radius: 12px; display: inline-block;">
+            <h1 style="color: red;">❌ Refresh Failed</h1>
+            <p>Error: {str(e)}</p>
+            <a href="/" style="color: #4CAF50;">🏠 Back to Home</a>
+        </div>
+        </body></html>
+        """
 
-    def manifest(self):
-        manifest_data = {
-            "id": "org.malayalam.pure.addon",
-            "version": "1.0.0",
-            "name": "Malayalam Movies (Pure Python)",
-            "description": "Malayalam movies from TMDB - Pure Python for maximum stability",
-            "resources": ["catalog"],
-            "types": ["movie"],
-            "catalogs": [{
-                "type": "movie",
-                "id": "malayalam",
-                "name": "Malayalam Movies"
-            }],
-            "idPrefixes": ["tt"]
-        }
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.add_cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(manifest_data).encode())
-
-    def catalog(self):
-        if "default" not in API_KEYS:
-            catalog_data = {"metas": [], "message": "Configure API key first"}
-        else:
-            # Return test movie for now
-            catalog_data = {
-                "metas": [{
-                    "id": "tt1234567",
-                    "type": "movie",
-                    "name": "Test Malayalam Movie",
-                    "description": "Test movie - real TMDB fetching will be added next"
-                }]
-            }
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.add_cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(catalog_data).encode())
-
-    def refresh_page(self):
-        if "default" not in API_KEYS:
-            html = """
-            <h1>API Key Required</h1>
-            <p>Please configure your TMDB API key first.</p>
-            <a href="/configure">Configure API Key</a>
-            """
-        else:
-            html = """
-            <h1>Refresh Ready!</h1>
-            <p>API key is configured. Real movie fetching will be added in next version.</p>
-            <p>For now, catalog shows test movie to verify everything works.</p>
-            <a href="/">Back to Home</a> | <a href="/catalog/movie/malayalam.json" target="_blank">View Catalog</a>
-            """
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.add_cors_headers()
-        self.end_headers()
-        self.wfile.write(html.encode())
+# Export the app for Vercel (CRITICAL!)
+handler = app
