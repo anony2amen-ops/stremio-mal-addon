@@ -2,14 +2,36 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/index.py",
-      "use": "@vercel/python"
+      "src": "main.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "15mb",
+        "runtime": "python3.9"
+      }
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "api/index.py"
+      "dest": "main.py"
     }
-  ]
+  ],
+  "functions": {
+    "main.py": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/refresh",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/ping",
+      "schedule": "*/14 * * * *"
+    }
+  ],
+  "env": {
+    "PYTHONPATH": "./"
+  }
 }
