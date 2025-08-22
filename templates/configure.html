@@ -1,0 +1,123 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Malayalam Movies Stremio Addon - Configuration</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .config-container {
+            max-width: 500px;
+            margin: 50px auto;
+            background: white;
+            border-radius: 15px;
+            padding: 2rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        .stremio-logo {
+            width: 60px;
+            height: 60px;
+            margin: 0 auto 20px;
+            display: block;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            padding: 12px 30px;
+            border-radius: 50px;
+        }
+        .alert {
+            border-radius: 10px;
+        }
+        .manifest-url {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 8px;
+            font-family: monospace;
+            word-break: break-all;
+            border: 1px solid #dee2e6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="config-container">
+            <div class="text-center mb-4">
+                <svg class="stremio-logo" viewBox="0 0 24 24" fill="#667eea">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                </svg>
+                <h2 class="text-center mb-0">Malayalam Movies</h2>
+                <p class="text-muted">Stremio Addon Configuration</p>
+            </div>
+
+            {% if success %}
+                <div class="alert alert-success">
+                    <h5 class="alert-heading">✅ Configuration Successful!</h5>
+                    <p>Your addon is now configured and ready to use.</p>
+                    <hr>
+                    <h6>Your Addon URL:</h6>
+                    <div class="manifest-url">
+                        {{ request.url.scheme }}://{{ request.url.netloc }}/{{ user_id }}/manifest.json
+                    </div>
+                    <small class="text-muted mt-2 d-block">
+                        Copy this URL and paste it in Stremio's "Addon Repository URL" field.
+                    </small>
+                </div>
+                <div class="text-center">
+                    <a href="/" class="btn btn-outline-primary">← Back to Home</a>
+                </div>
+            {% else %}
+                {% if error %}
+                    <div class="alert alert-danger">
+                        <strong>Error:</strong> {{ error }}
+                    </div>
+                {% endif %}
+
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="tmdb_api_key" class="form-label">
+                            <strong>TMDB API Key</strong>
+                        </label>
+                        <input 
+                            type="text" 
+                            class="form-control" 
+                            id="tmdb_api_key" 
+                            name="tmdb_api_key" 
+                            placeholder="Enter your TMDB API key"
+                            required
+                        >
+                        <div class="form-text">
+                            Don't have a TMDB API key? 
+                            <a href="https://www.themoviedb.org/settings/api" target="_blank">Get one here</a>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100">
+                        Configure Addon
+                    </button>
+                </form>
+
+                <div class="mt-4 p-3 bg-light rounded">
+                    <h6>How to get TMDB API Key:</h6>
+                    <ol class="small mb-0">
+                        <li>Create a free account at <a href="https://www.themoviedb.org/" target="_blank">TMDB</a></li>
+                        <li>Go to your account settings</li>
+                        <li>Navigate to the API section</li>
+                        <li>Request a new API key</li>
+                        <li>Copy and paste it above</li>
+                    </ol>
+                </div>
+
+                <div class="text-center mt-3">
+                    <a href="/" class="btn btn-outline-secondary">← Back to Home</a>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
